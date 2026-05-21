@@ -9,13 +9,17 @@ import (
 	"text/template"
 
 	gitlab "gitlab.com/gitlab-org/api/client-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type GitlabInfo struct {
 	Token    string
 	GitlabNs string
 	BaseURL  string
+	client   *GitlabClient
 }
+
 type GitlabVariable struct {
 	Key   string
 	Value string
@@ -30,9 +34,9 @@ type GitlabClient struct {
 	*gitlab.Client
 }
 
-func (g *GitlabInfo) Initgitlab(ctx context.Context) (*GitlabClient, error) {
+func (g *GitlabInfo) Init(ctx context.Context) error {
 	if g.Token == "" {
-		return nil, errors.New("token cannot be empty")
+		return errors.New("token cannot be empty")
 	}
 
 	baseURL := g.BaseURL
@@ -42,176 +46,172 @@ func (g *GitlabInfo) Initgitlab(ctx context.Context) (*GitlabClient, error) {
 
 	client, err := gitlab.NewClient(g.Token, gitlab.WithBaseURL(baseURL))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return &GitlabClient{
-		Client: client,
-	}, nil
+	g.client = &GitlabClient{Client: client}
+	return nil
 }
 
 func (g *GitlabInfo) ListProject(ctx context.Context) ([]*GitlabResp, error) {
-	respList := []*GitlabResp{}
+	ctx, span := otel.Tracer("gitlab").Start(ctx, "ListProject")
+	defer span.End()
 
-	git, err := g.Initgitlab(ctx)
-	if err != nil {
-		return []*GitlabResp{}, err
-	}
-
-	projList, _, err := git.Groups.ListGroupProjects(g.GitlabNs, &gitlab.ListGroupProjectsOptions{
+	projList, _, err := g.client.Groups.ListGroupProjects(g.GitlabNs, &gitlab.ListGroupProjectsOptions{
 		Archived: gitlab.Ptr(false),
 	})
 	if err != nil {
-		return []*GitlabResp{}, err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
+	respList := make([]*GitlabResp, 0, len(projList))
 	for _, repo := range projList {
-		resp := &GitlabResp{
+		respList = append(respList, &GitlabResp{
 			ProjectName: repo.Name,
 			ProjectId:   strconv.Itoa(repo.ID),
-		}
-		respList = append(respList, resp)
+		})
 	}
-
 	return respList, nil
 }
 
 func (g *GitlabInfo) AddGitlabCiFile(ctx context.Context, gr *GitlabResp, content string) error {
-	git, err := g.Initgitlab(ctx)
-	if err != nil {
-		return err
-	}
+	ctx, span := otel.Tracer("gitlab").Start(ctx, "AddGitlabCiFile")
+	defer span.End()
+
 	if exists, _ := g.CheckFileExists(ctx, gr, ".gitlab-ci.yaml"); !exists {
-		_, _, err = git.RepositoryFiles.CreateFile(gr.ProjectId, ".gitlab-ci.yaml", &gitlab.CreateFileOptions{
+		_, _, err := g.client.RepositoryFiles.CreateFile(gr.ProjectId, ".gitlab-ci.yaml", &gitlab.CreateFileOptions{
 			Branch:        gitlab.Ptr("main"),
 			CommitMessage: gitlab.Ptr("Add .gitlab-ci.yaml"),
 			Content:       gitlab.Ptr(content),
 		})
-	} else {
-		_, _, err = git.RepositoryFiles.UpdateFile(gr.ProjectId, ".gitlab-ci.yaml", &gitlab.UpdateFileOptions{
-			Branch:        gitlab.Ptr("main"),
-			CommitMessage: gitlab.Ptr("Update .gitlab-ci.yaml"),
-			Content:       gitlab.Ptr(content),
-		})
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+		return nil
 	}
+	_, _, err := g.client.RepositoryFiles.UpdateFile(gr.ProjectId, ".gitlab-ci.yaml", &gitlab.UpdateFileOptions{
+		Branch:        gitlab.Ptr("main"),
+		CommitMessage: gitlab.Ptr("Update .gitlab-ci.yaml"),
+		Content:       gitlab.Ptr(content),
+	})
 	if err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
-
-	return nil
+	return err
 }
 
 func (g *GitlabInfo) AddGitlabReadmeFile(ctx context.Context, gr *GitlabResp, content string) error {
-	git, err := g.Initgitlab(ctx)
-	if err != nil {
-		return err
-	}
+	ctx, span := otel.Tracer("gitlab").Start(ctx, "AddGitlabReadmeFile")
+	defer span.End()
+
 	tpl, err := template.New("readme").Parse(content)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 	var buf bytes.Buffer
-	err = tpl.Execute(&buf, map[string]interface{}{
+	if err = tpl.Execute(&buf, map[string]interface{}{
 		"ProjectName": gr.ProjectName,
-	})
-	if err != nil {
+	}); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+
 	if exists, _ := g.CheckFileExists(ctx, gr, "README.md"); !exists {
-		_, _, err = git.RepositoryFiles.CreateFile(gr.ProjectId, "README.md", &gitlab.CreateFileOptions{
+		_, _, err = g.client.RepositoryFiles.CreateFile(gr.ProjectId, "README.md", &gitlab.CreateFileOptions{
 			Branch:        gitlab.Ptr("main"),
 			CommitMessage: gitlab.Ptr("Add README.md"),
 			Content:       gitlab.Ptr(buf.String()),
 		})
 	} else {
-		_, _, err = git.RepositoryFiles.UpdateFile(gr.ProjectId, "README.md", &gitlab.UpdateFileOptions{
+		_, _, err = g.client.RepositoryFiles.UpdateFile(gr.ProjectId, "README.md", &gitlab.UpdateFileOptions{
 			Branch:        gitlab.Ptr("main"),
 			CommitMessage: gitlab.Ptr("Update README.md"),
 			Content:       gitlab.Ptr(buf.String()),
 		})
 	}
 	if err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
-
-	return nil
+	return err
 }
+
 func (g *GitlabInfo) CheckFileExists(ctx context.Context, gr *GitlabResp, filePath string) (bool, error) {
-	git, err := g.Initgitlab(ctx)
-	if err != nil {
-		return false, err
-	}
-	_, _, err = git.RepositoryFiles.GetFile(gr.ProjectId, filePath, &gitlab.GetFileOptions{
+	_, span := otel.Tracer("gitlab").Start(ctx, "CheckFileExists")
+	defer span.End()
+
+	_, _, err := g.client.RepositoryFiles.GetFile(gr.ProjectId, filePath, &gitlab.GetFileOptions{
 		Ref: gitlab.Ptr("main"),
 	})
 	if err != nil {
 		return false, err
 	}
-
 	return true, nil
 }
 
 func (g *GitlabInfo) ListVariables(ctx context.Context, gr *GitlabResp) ([]*gitlab.ProjectVariable, error) {
-	git, err := g.Initgitlab(ctx)
+	ctx, span := otel.Tracer("gitlab").Start(ctx, "ListVariables")
+	defer span.End()
+
+	vars, _, err := g.client.ProjectVariables.ListVariables(gr.ProjectId, &gitlab.ListProjectVariablesOptions{})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-
-	vars, _, err := git.ProjectVariables.ListVariables(gr.ProjectId, &gitlab.ListProjectVariablesOptions{})
-	if err != nil {
-		return nil, err
-	}
-
 	return vars, nil
 }
 
 func (g *GitlabInfo) CreateVariable(ctx context.Context, gr *GitlabResp, v *GitlabVariable) error {
-	git, err := g.Initgitlab(ctx)
-	if err != nil {
-		return err
-	}
+	ctx, span := otel.Tracer("gitlab").Start(ctx, "CreateVariable")
+	defer span.End()
 
-	_, _, err = git.ProjectVariables.CreateVariable(gr.ProjectId, &gitlab.CreateProjectVariableOptions{
+	_, _, err := g.client.ProjectVariables.CreateVariable(gr.ProjectId, &gitlab.CreateProjectVariableOptions{
 		Key:       &v.Key,
 		Value:     &v.Value,
 		Protected: gitlab.Ptr(false),
 	})
 	if err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
-
-	return nil
+	return err
 }
 
 func (g *GitlabInfo) UpdateVariable(ctx context.Context, gr *GitlabResp, variable *gitlab.ProjectVariable) error {
-	git, err := g.Initgitlab(ctx)
-	if err != nil {
-		return err
-	}
-	// TODO: Check variable type and if file concatenate content
+	ctx, span := otel.Tracer("gitlab").Start(ctx, "UpdateVariable")
+	defer span.End()
 
 	switch variable.VariableType {
 	case gitlab.FileVariableType:
-		// compute
-		// get the file content and parse it
 		content := strings.Split(variable.Value, ":")
 		content = append(content, gr.ProjectId)
-
-		updateedVal := strings.Join(content, ":")
-		_, _, err = git.ProjectVariables.UpdateVariable(gr.ProjectId, variable.Key, &gitlab.UpdateProjectVariableOptions{
-			Value: &updateedVal,
+		updatedVal := strings.Join(content, ":")
+		_, _, err := g.client.ProjectVariables.UpdateVariable(gr.ProjectId, variable.Key, &gitlab.UpdateProjectVariableOptions{
+			Value: &updatedVal,
 		})
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
 	default:
-		_, _, err = git.ProjectVariables.UpdateVariable(gr.ProjectId, variable.Key, &gitlab.UpdateProjectVariableOptions{
+		_, _, err := g.client.ProjectVariables.UpdateVariable(gr.ProjectId, variable.Key, &gitlab.UpdateProjectVariableOptions{
 			Value: &gr.ProjectId,
 		})
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
 	}
-
 	return nil
 }

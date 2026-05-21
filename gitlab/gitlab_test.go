@@ -11,7 +11,6 @@ import (
 func setupMockGitLabServer() (*httptest.Server, func()) {
 	mux := http.NewServeMux()
 
-	// Mock token validation endpoint
 	mux.HandleFunc("/api/v4/user", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("PRIVATE-TOKEN")
 		if token != "valid-token" {
@@ -21,23 +20,15 @@ func setupMockGitLabServer() (*httptest.Server, func()) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Mock projects endpoint
-	mux.HandleFunc("/api/v4/projects", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v4/groups/test-namespace/projects", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("PRIVATE-TOKEN")
 		if token != "valid-token" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-
 		projects := []map[string]interface{}{
-			{
-				"id":   1,
-				"name": "project1",
-			},
-			{
-				"id":   2,
-				"name": "project2",
-			},
+			{"id": 1, "name": "project1"},
+			{"id": 2, "name": "project2"},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(projects)
@@ -47,7 +38,7 @@ func setupMockGitLabServer() (*httptest.Server, func()) {
 	return server, server.Close
 }
 
-func TestInitgitlab(t *testing.T) {
+func TestInit(t *testing.T) {
 	server, cleanup := setupMockGitLabServer()
 	defer cleanup()
 
@@ -74,20 +65,17 @@ func TestInitgitlab(t *testing.T) {
 				Token:   tt.token,
 				BaseURL: server.URL + "/api/v4",
 			}
-			client, err := g.Initgitlab(context.Background())
+			err := g.Init(context.Background())
 			if tt.wantErr {
 				if err == nil {
-					t.Error("Expected error but got none")
-				}
-				if client != nil {
-					t.Error("Expected nil client but got one")
+					t.Error("expected error but got none")
 				}
 			} else {
 				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
+					t.Errorf("unexpected error: %v", err)
 				}
-				if client == nil {
-					t.Error("Expected client but got nil")
+				if g.client == nil {
+					t.Error("expected client to be set but got nil")
 				}
 			}
 		})
@@ -128,27 +116,33 @@ func TestListProject(t *testing.T) {
 				GitlabNs: tt.namespace,
 				BaseURL:  server.URL + "/api/v4",
 			}
-			projects, err := g.ListProject()
+			if err := g.Init(context.Background()); err != nil {
+				if tt.wantErr {
+					return
+				}
+				t.Fatalf("unexpected init error: %v", err)
+			}
+			projects, err := g.ListProject(context.Background())
 			if tt.wantErr {
 				if err == nil {
-					t.Error("Expected error but got none")
+					t.Error("expected error but got none")
 				}
 				if len(projects) != 0 {
-					t.Errorf("Expected 0 projects but got %d", len(projects))
+					t.Errorf("expected 0 projects but got %d", len(projects))
 				}
 			} else {
 				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
+					t.Errorf("unexpected error: %v", err)
 				}
 				if len(projects) != tt.wantCount {
-					t.Errorf("Expected %d projects but got %d", tt.wantCount, len(projects))
+					t.Errorf("expected %d projects but got %d", tt.wantCount, len(projects))
 				}
 				for _, project := range projects {
 					if project.ProjectName == "" {
-						t.Error("Project name should not be empty")
+						t.Error("project name should not be empty")
 					}
 					if project.ProjectId == "" {
-						t.Error("Project ID should not be empty")
+						t.Error("project ID should not be empty")
 					}
 				}
 			}
@@ -156,13 +150,8 @@ func TestListProject(t *testing.T) {
 	}
 }
 
-func ListVariables(t *testing.T) {
+func ListVariables(t *testing.T) {}
 
-}
+func CreateVariable(t *testing.T) {}
 
-func CreateVariable(t *testing.T) {
-
-}
-func UpdateVariable(t *testing.T) {
-
-}
+func UpdateVariable(t *testing.T) {}

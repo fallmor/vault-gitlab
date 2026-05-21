@@ -7,64 +7,68 @@ import (
 
 	"github.com/hashicorp/vault-client-go"
 	"github.com/hashicorp/vault-client-go/schema"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type Creds struct {
-	vault_addr  string
-	vault_path  string
-	vault_token string
+	vaultAddr  string
+	vaultPath  string
+	vaultToken string
 }
+
 type CredsApprole struct {
-	vault_addr       string
-	vault_path       string
-	approle_roleid   string
-	approle_secretid string
+	vaultAddr       string
+	vaultPath       string
+	approleRoleID   string
+	approleSecretID string
 }
-type VaultRespone struct {
+
+type VaultResponse struct {
 	Token      map[string]interface{}
 	ExpireTime string
 }
 
 func NewCreds(addr, path, token string) *Creds {
 	return &Creds{
-		vault_addr:  addr,
-		vault_path:  path,
-		vault_token: token,
+		vaultAddr:  addr,
+		vaultPath:  path,
+		vaultToken: token,
 	}
 }
 
-func NewCredsApprole(addr, path, roleid, secretid string) *CredsApprole {
+func NewCredsApprole(addr, path, roleID, secretID string) *CredsApprole {
 	return &CredsApprole{
-		vault_addr:       addr,
-		vault_path:       path,
-		approle_roleid:   roleid,
-		approle_secretid: secretid,
+		vaultAddr:       addr,
+		vaultPath:       path,
+		approleRoleID:   roleID,
+		approleSecretID: secretID,
 	}
 }
 
 type GetCreds interface {
-	RetrieveCreds(context.Context) (*VaultRespone, error)
+	RetrieveCreds(context.Context) (*VaultResponse, error)
 }
 
-func (c *Creds) InitVault(ctx context.Context) (vault.Client, error) {
+func (c *Creds) initVault(ctx context.Context) (vault.Client, error) {
 	client, err := vault.New(
-		vault.WithAddress(c.vault_addr),
+		vault.WithAddress(c.vaultAddr),
 		vault.WithRequestTimeout(30*time.Second),
 	)
 	if err != nil {
 		log.Print("could not initialize vault")
 		return vault.Client{}, err
 	}
-	if err := client.SetToken(c.vault_token); err != nil {
-		log.Print("Could not connect to vault")
+	if err := client.SetToken(c.vaultToken); err != nil {
+		log.Print("could not set vault token")
 		return vault.Client{}, err
 	}
 	return *client.Clone(), nil
 }
 
-func (c *CredsApprole) InitVault(ctx context.Context) (vault.Client, error) {
+func (c *CredsApprole) initVault(ctx context.Context) (vault.Client, error) {
 	client, err := vault.New(
-		vault.WithAddress(c.vault_addr),
+		vault.WithAddress(c.vaultAddr),
 		vault.WithRequestTimeout(30*time.Second),
 	)
 	if err != nil {
@@ -72,70 +76,71 @@ func (c *CredsApprole) InitVault(ctx context.Context) (vault.Client, error) {
 		return vault.Client{}, err
 	}
 
-	vaultoken, err := client.Auth.AppRoleLogin(ctx, schema.AppRoleLoginRequest{
-		RoleId:   c.approle_roleid,
-		SecretId: c.approle_secretid,
-	},
-		vault.WithMountPath("approle"))
+	vaultToken, err := client.Auth.AppRoleLogin(ctx, schema.AppRoleLoginRequest{
+		RoleId:   c.approleRoleID,
+		SecretId: c.approleSecretID,
+	}, vault.WithMountPath("approle"))
 	if err != nil {
-		log.Printf("Could not retrieve the token with approle because of the error %v", err)
+		log.Printf("could not retrieve token with approle: %v", err)
 		return vault.Client{}, err
 	}
 
-	if vaultoken == nil || vaultoken.Auth == nil {
-		log.Println("Login success but no authentication infos received")
+	if vaultToken == nil || vaultToken.Auth == nil {
+		log.Println("login succeeded but no auth info received")
 		return vault.Client{}, err
 	}
-	if err := client.SetToken(vaultoken.Auth.ClientToken); err != nil {
-		log.Println("Could not connect to vault")
+	if err := client.SetToken(vaultToken.Auth.ClientToken); err != nil {
+		log.Println("could not set vault token")
 		return vault.Client{}, err
 	}
-
-	// Print token details
 
 	return *client.Clone(), nil
 }
 
-func (c *Creds) RetrieveCreds(ctx context.Context) (*VaultRespone, error) {
-	client, err := c.InitVault(ctx)
+func (c *Creds) RetrieveCreds(ctx context.Context) (*VaultResponse, error) {
+	ctx, span := otel.Tracer("vault").Start(ctx, "RetrieveCreds/token")
+	defer span.End()
+
+	client, err := c.initVault(ctx)
 	if err != nil {
-		log.Println("Could not set the vault")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
-	resp, err := client.Secrets.KvV2Read(ctx, c.vault_path, vault.WithMountPath("secret"))
+	resp, err := client.Secrets.KvV2Read(ctx, c.vaultPath, vault.WithMountPath("secret"))
 	if err != nil {
-		log.Printf("Could not retrieve the secret %s", c.vault_path)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		log.Printf("could not retrieve secret at %s", c.vaultPath)
 		return nil, err
 	}
-	return &VaultRespone{
+	return &VaultResponse{
 		Token:      resp.Data.Data,
 		ExpireTime: "",
 	}, nil
 }
 
-func (c *CredsApprole) RetrieveCreds(ctx context.Context) (*VaultRespone, error) {
-	client, err := c.InitVault(ctx)
+func (c *CredsApprole) RetrieveCreds(ctx context.Context) (*VaultResponse, error) {
+	ctx, span := otel.Tracer("vault").Start(ctx, "RetrieveCreds/approle")
+	defer span.End()
+
+	client, err := c.initVault(ctx)
 	if err != nil {
-		log.Println("Could not set the vault")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	resp, err := client.Secrets.KvV2Read(ctx, c.vault_path, vault.WithMountPath("secret"))
+
+	resp, err := client.Secrets.KvV2Read(ctx, c.vaultPath, vault.WithMountPath("secret"))
 	if err != nil {
-		log.Printf("Could not retrieve the secret %s", c.vault_path)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		log.Printf("could not retrieve secret at %s", c.vaultPath)
 		return nil, err
 	}
-	return &VaultRespone{
+	return &VaultResponse{
 		Token:      resp.Data.Data,
 		ExpireTime: "",
 	}, nil
-}
-
-func GetSecret(gt GetCreds, ctx context.Context) (*VaultRespone, error) {
-	resp, err := gt.RetrieveCreds(ctx)
-	if err != nil {
-		log.Println("Could not get the secrets")
-		return nil, err
-	}
-	return resp, nil
 }
